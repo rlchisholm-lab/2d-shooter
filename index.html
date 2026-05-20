@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>2D Shooter - TCP</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050505; overflow: hidden; font-family: monospace; color: #0f0; }
+        canvas { display: block; }
+        
+        #connectScreen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 100;
+        }
+        #connectScreen h1 { font-size: 48px; margin-bottom: 20px; text-shadow: 0 0 20px #0f0; }
+        #connectScreen input {
+            padding: 12px 20px; font-size: 16px; background: #111; border: 2px solid #0f0;
+            color: #0f0; border-radius: 4px; margin: 8px; width: 280px; outline: none;
+        }
+        #connectScreen button {
+            padding: 12px 40px; font-size: 18px; background: #0f0; color: #000;
+            border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 16px;
+        }
+        #connectScreen button:hover { background: #0a0; }
+        
+        #hud { position: fixed; top: 15px; left: 15px; display: none; }
+        #healthBar { width: 180px; height: 16px; background: #222; border: 1px solid #0f0; }
+        #healthFill { height: 100%; background: #0f0; transition: width 0.15s; }
+        
+        #scoreBoard {
+            position: fixed; top: 15px; right: 15px; background: rgba(0,0,0,0.8);
+            padding: 12px; border: 1px solid #0f0; min-width: 180px; display: none;
+        }
+        .scoreRow { display: flex; justify-content: space-between; margin: 3px 0; font-size: 13px; }
+        
+        #killFeed { position: fixed; bottom: 80px; right: 15px; text-align: right; }
+        .killMsg { background: rgba(0,0,0,0.7); padding: 6px 12px; margin: 4px 0; font-size: 13px; animation: fade 3s forwards; }
+        @keyframes fade { 0%,80% { opacity: 1; } 100% { opacity: 0; } }
+        
+        #crosshair {
+            position: fixed; width: 20px; height: 20px; border: 2px solid #0f0;
+            border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%); display: none;
+        }
+        #coords { position: fixed; bottom: 15px; left: 15px; font-size: 12px; color: #555; display: none; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="connectScreen">
+        <h1>◉ SHOOTER</h1>
+        <input type="text" id="nameIn" placeholder="Your name" maxlength="16" value="Player">
+        <input type="text" id="ipIn" placeholder="Server IP:PORT" value="10.50.25.236:7777">
+        <button onclick="connect()">CONNECT</button>
+        <p style="margin-top:15px;color:#444;font-size:12px;">WASD = Move | Mouse = Aim | Click = Shoot</p>
+    </div>
+    
+    <div id="hud">
+        <div style="font-size:12px;margin-bottom:4px;">HEALTH</div>
+        <div id="healthBar"><div id="healthFill"></div></div>
+    </div>
+    
+    <div id="scoreBoard"><div style="border-bottom:1px solid #0f0;margin-bottom:6px;padding-bottom:4px;">SCORES</div><div id="scoreList"></div></div>
+    <div id="killFeed"></div>
+    <div id="crosshair"></div>
+    <div id="coords"></div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let ws = null, myId = null, players = {}, bullets = [];
+let mapW = 2000, mapH = 2000, camera = {x:0, y:0};
+const keys = {};
+let mx = 0, my = 0, connected = false;
+
+function resize(){ canvas.width = innerWidth; canvas.height = innerHeight; }
+window.addEventListener('resize', resize); resize();
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+window.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+window.addEventListener('mousedown', () => { if(connected) send({type:'shoot'}); });
+
+function send(obj){ if(ws && ws.readyState === 1) ws.send(JSON.stringify(obj)+'\n'); }
+
+function connect(){
+    const name = document.getElementById('nameIn').value || 'Unknown';
+    const addr = document.getElementById('ipIn').value;
+    const [ip, port] = addr.split(':');
+    
+    ws = new WebSocket(`ws://${addr}`);
+    
+    ws.onopen = () => {
+        connected = true;
+        send({type:'name', name: name});
+        document.getElementById('connectScreen').style.display = 'none';
+        document.getElementById('hud').style.display = 'block';
+        document.getElementById('scoreBoard').style.display = 'block';
+        document.getElementById('crosshair').style.display = 'block';
+        document.getElementById('coords').style.display = 'block';
+        loop();
+    };
+    
+    let buf = '';
+    ws.onmessage = (e) => {
+        buf += e.data;
+        let i;
+        while((i = buf.indexOf('\n')) !== -1){
+            const line = buf.slice(0, i);
+            buf = buf.slice(i+1);
+            try{
+                const d = JSON.parse(line);
+                switch(d.type){
+                    case 'init': myId = d.playerId; players = d.players; mapW = d.map.width; mapH = d.map.height; break;
+                    case 'state': players = d.players; bullets = d.bullets; break;
+                    case 'playerJoined': case 'playerUpdate': players[d.player.id] = d.player; break;
+                    case 'playerLeft': delete players[d.playerId]; break;
+                    case 'kill': addKill(d.killer, d.victim); break;
+                }
+            }catch(err){}
+        }
+    };
+    
+    ws.onerror = () => alert('Connection failed!');
+    ws.onclose = () => location.reload();
+}
+
+function addKill(k, v){
+    const f = document.getElementById('killFeed');
+    const d = document.createElement('div');
+    d.className = 'killMsg';
+    d.innerHTML = `<span style="color:#0f0">${k}</span> ☠ <span style="color:#f55">${v}</span>`;
+    f.appendChild(d);
+    setTimeout(() => d.remove(), 3000);
+}
+
+function updateUI(){
+    const me = players[myId];
+    if(!me) return;
+    const pct = (me.health / me.maxHealth) * 100;
+    const fill = document.getElementById('healthFill');
+    fill.style.width = pct + '%';
+    fill.style.background = pct > 50 ? '#0f0' : pct > 25 ? '#ff0' : '#f00';
+    
+    const list = document.getElementById('scoreList');
+    list.innerHTML = '';
+    Object.values(players).sort((a,b) => b.score - a.score).forEach(p => {
+        list.innerHTML += `<div class="scoreRow"><span style="color:${p.id===myId?'#0f0':'#aaa'}">${p.name}</span><span>${p.score}</span></div>`;
+    });
+    
+    document.getElementById('coords').textContent = `POS: ${Math.round(me.x)}, ${Math.round(me.y)}`;
+}
+
+function sendInput(){
+    const me = players[myId];
+    if(!me) return;
+    const sx = me.x - camera.x, sy = me.y - camera.y;
+    const angle = Math.atan2(my - sy, mx - sx);
+    send({type:'input', keys:{w:!!keys.w, a:!!keys.a, s:!!keys.s, d:!!keys.d}, angle:angle});
+}
+
+function draw(){
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Grid
+    ctx.strokeStyle = 'rgba(0,255,0,0.06)';
+    ctx.lineWidth = 1;
+    const gs = 50;
+    const sx = Math.floor(camera.x/gs)*gs, sy = Math.floor(camera.y/gs)*gs;
+    for(let x=sx; x<camera.x+canvas.width; x+=gs){ ctx.beginPath(); ctx.moveTo(x-camera.x,0); ctx.lineTo(x-camera.x,canvas.height); ctx.stroke(); }
+    for(let y=sy; y<camera.y+canvas.height; y+=gs){ ctx.beginPath(); ctx.moveTo(0,y-camera.y); ctx.lineTo(canvas.width,y-camera.y); ctx.stroke(); }
+    
+    // Border
+    ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2;
+    ctx.strokeRect(-camera.x, -camera.y, mapW, mapH);
+    
+    // Bullets
+    ctx.fillStyle = '#ff0';
+    bullets.forEach(b => {
+        const x = b.x - camera.x, y = b.y - camera.y;
+        ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,0,0.2)';
+        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x-b.vx*2, y-b.vy*2); ctx.stroke();
+    });
+    
+    // Players
+    for(const id in players){
+        const p = players[id];
+        const x = p.x - camera.x, y = p.y - camera.y;
+        if(x < -50 || x > canvas.width+50 || y < -50 || y > canvas.height+50) continue;
+        
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(p.angle);
+        
+        // Body
+        ctx.fillStyle = id === myId ? '#0f0' : p.color;
+        ctx.beginPath(); ctx.arc(0, 0, p.radius, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+        
+        // Gun
+        ctx.fillStyle = '#444'; ctx.fillRect(12, -4, 22, 8);
+        
+        // Aim line
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(40,0); ctx.stroke();
+        
+        ctx.restore();
+        
+        // Name
+        ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(p.name, x, y - p.radius - 8);
+        
+        // HP bar
+        if(p.health < p.maxHealth){
+            const bw = 36, bh = 4, bx = x - bw/2, by = y - p.radius - 20;
+            ctx.fillStyle = '#333'; ctx.fillRect(bx, by, bw, bh);
+            ctx.fillStyle = p.health > 50 ? '#0f0' : '#f00';
+            ctx.fillRect(bx, by, bw * (p.health/p.maxHealth), bh);
+        }
+    }
+    
+    // Crosshair
+    const ch = document.getElementById('crosshair');
+    ch.style.left = mx + 'px'; ch.style.top = my + 'px';
+}
+
+function loop(){
+    if(!players[myId]) return requestAnimationFrame(loop);
+    const me = players[myId];
+    
+    camera.x = me.x - canvas.width/2;
+    camera.y = me.y - canvas.height/2;
+    camera.x = Math.max(0, Math.min(mapW - canvas.width, camera.x));
+    camera.y = Math.max(0, Math.min(mapH - canvas.height, camera.y));
+    
+    sendInput();
+    draw();
+    updateUI();
+    requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
